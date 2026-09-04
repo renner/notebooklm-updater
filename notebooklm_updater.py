@@ -32,6 +32,7 @@ from googleapiclient.http import MediaFileUpload
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 DOC_LANDING_URL = "https://documentation.suse.com/multi-linux-manager/"
+GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
 CREDENTIALS_FILE = "credentials.json"
 TOKEN_FILE = "token.json"
 MANIFEST_FILE = "manifest.json"
@@ -117,21 +118,22 @@ def download(url, dest_path):
 
 
 def upload_to_drive(service, folder_id, filename, filepath, drive_file_id=None):
-    """Create or update a file in Drive; return the file ID."""
+    """Import a PDF as a Google Doc; return the file ID."""
     media = MediaFileUpload(filepath, mimetype="application/pdf", resumable=True)
+    file = service.files().create(
+        body={
+            "name": Path(filename).stem,
+            "mimeType": GOOGLE_DOC_MIME_TYPE,
+            "parents": [folder_id],
+        },
+        media_body=media,
+        fields="id",
+    ).execute()
+
     if drive_file_id:
-        file = service.files().update(
-            fileId=drive_file_id,
-            media_body=media,
-            fields="id",
-        ).execute()
+        service.files().delete(fileId=drive_file_id).execute()
         print(f"  updated  {filename}")
     else:
-        file = service.files().create(
-            body={"name": filename, "parents": [folder_id]},
-            media_body=media,
-            fields="id",
-        ).execute()
         print(f"  uploaded {filename}")
     return file["id"]
 
