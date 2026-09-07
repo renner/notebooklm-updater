@@ -16,6 +16,7 @@ Subsequent runs reuse the saved token and only upload changed PDFs.
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -28,10 +29,27 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 DOC_LANDING_URL = "https://documentation.suse.com/multi-linux-manager/"
+HTML_SOURCES = [
+    {
+        "filename": "SUSE Multi-Linux Manager Server 5.2 Release Notes.html",
+        "url": (
+            "https://www.suse.com/releasenotes/x86_64/multi-linux-manager/"
+            "5.2/index.html"
+        ),
+    },
+    {
+        "filename": "SUSE Multi-Linux Manager Proxy 5.2 Release Notes.html",
+        "url": (
+            "https://www.suse.com/releasenotes/x86_64/multi-linux-manager-proxy/"
+            "5.2/index.html"
+        ),
+    },
+]
 GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
 CREDENTIALS_FILE = "credentials.json"
 TOKEN_FILE = "token.json"
@@ -117,9 +135,11 @@ def download(url, dest_path):
     return resp.headers
 
 
-def upload_to_drive(service, folder_id, filename, filepath, drive_file_id=None):
-    """Import a PDF as a Google Doc; return the file ID."""
-    media = MediaFileUpload(filepath, mimetype="application/pdf", resumable=True)
+def upload_to_drive(
+    service, folder_id, filename, filepath, source_mime_type, drive_file_id=None
+):
+    """Import a source file as a Google Doc; return the file ID."""
+    media = MediaFileUpload(filepath, mimetype=source_mime_type, resumable=True)
     file = service.files().create(
         body={
             "name": Path(filename).stem,
@@ -131,11 +151,50 @@ def upload_to_drive(service, folder_id, filename, filepath, drive_file_id=None):
     ).execute()
 
     if drive_file_id:
-        service.files().delete(fileId=drive_file_id).execute()
-        print(f"  updated  {filename}")
+        try:
+            service.files().delete(fileId=drive_file_id).execute()
+        except HttpError as error:
+            if error.resp.status != 404:
+                raise
+            print(f"  uploaded {filename} (previous file was not found)")
+        else:
+            print(f"  updated  {filename}")
     else:
         print(f"  uploaded {filename}")
     return file["id"]
+
+
+def sync_html_source(service, folder_id, manifest, tmpdir, source):
+    """Import a configured HTML page as a Google Doc when its content changes."""
+    filename = source["filename"]
+    url = source["url"]
+    entry = manifest.get(filename)
+
+    print(f"  downloading {filename} ...")
+    dest = Path(tmpdir) / filename
+    headers = download(url, str(dest))
+    content_sha256 = hashlib.sha256(dest.read_bytes()).hexdigest()
+    if entry and entry.get("content_sha256") == content_sha256:
+        print(f"  skipped  {filename} (unchanged)")
+        return False, True
+
+    drive_id = upload_to_drive(
+        service,
+        folder_id,
+        filename,
+        str(dest),
+        source_mime_type="text/html",
+        drive_file_id=entry.get("drive_file_id") if entry else None,
+    )
+    manifest[filename] = {
+        "url": url,
+        "drive_file_id": drive_id,
+        "etag": headers.get("ETag"),
+        "size": headers.get("Content-Length"),
+        "content_sha256": content_sha256,
+    }
+    save_manifest(manifest)
+    return True, False
 
 
 def main():
@@ -152,7 +211,7 @@ def main():
     print(f"Fetching latest PDF list from {DOC_LANDING_URL} ...")
     doc_base_url, pdfs = find_pdf_urls()
     print(f"Using documentation release at {doc_base_url}")
-    print(f"Found {len(pdfs)} PDFs\n")
+    print(f"Found {len(pdfs)} PDFs and {len(HTML_SOURCES)} HTML pages\n")
 
     manifest = load_manifest()
     service = get_drive_service()
@@ -160,6 +219,13 @@ def main():
     updated = skipped = 0
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        for source in HTML_SOURCES:
+            html_updated, html_skipped = sync_html_source(
+                service, args.folder_id, manifest, tmpdir, source
+            )
+            updated += html_updated
+            skipped += html_skipped
+
         for filename, url in sorted(pdfs.items()):
             entry = manifest.get(filename)
             if not has_changed(url, entry):
@@ -173,6 +239,7 @@ def main():
 
             drive_id = upload_to_drive(
                 service, args.folder_id, filename, str(dest),
+                source_mime_type="application/pdf",
                 drive_file_id=entry.get("drive_file_id") if entry else None,
             )
 

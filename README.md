@@ -1,8 +1,8 @@
 # NotebookLM Updater
 
-Sync the latest SUSE Multi-Linux Manager documentation PDFs to a Google Drive folder as native Google Docs for use with NotebookLM.
+Sync the latest SUSE Multi-Linux Manager documentation PDFs and configured HTML pages to a Google Drive folder as native Google Docs for use with NotebookLM.
 
-The script discovers PDF manuals from the official documentation landing page, imports them as Google Docs, and records their source metadata in a local manifest. Later runs only replace documents whose source PDF has changed.
+The script discovers PDF manuals from the official documentation landing page and imports configured single-page HTML sources, including the Multi-Linux Manager and Multi-Linux Manager Proxy 5.2 release notes. It imports each source as a Google Doc and records source metadata in a local manifest. Later runs only replace documents whose source has changed.
 
 ## Setup
 
@@ -33,4 +33,8 @@ The first run opens a browser so each user can authorize their own Google accoun
 
 ## Updates
 
-The script stores source URLs, ETags, file sizes, and managed Google Drive IDs in `manifest.json`. When an upstream PDF changes, it imports a replacement Google Doc, then deletes the prior managed Drive file. To force a document to be imported again, remove its `etag` and `size` fields from its entry in `manifest.json`.
+The script stores source URLs, ETags, file sizes, content hashes where needed, and managed Google Drive IDs in `manifest.json`. When an upstream PDF or configured HTML page changes, it imports a replacement Google Doc, then deletes the prior managed Drive file. To force a document to be imported again, remove its change-detection fields from its entry in `manifest.json`.
+
+## HTML Sources
+
+Configure single-page HTML documents in the `HTML_SOURCES` list near the top of `notebooklm_updater.py`. Each entry needs a `filename` (the Google Doc name) and a `url`. HTML is downloaded on each run and compared using a SHA-256 content hash, so unchanged pages are not re-imported.
