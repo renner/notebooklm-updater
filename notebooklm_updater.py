@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Downloads PDFs from the latest SUSE Multi-Linux Manager documentation
-and syncs them to a Google Drive folder for use with NotebookLM.
+Downloads configured source documents and syncs them to a Google Drive folder
+as Google Docs for use with NotebookLM.
 
 First-time setup:
   1. Go to https://console.cloud.google.com/
@@ -12,12 +12,13 @@ First-time setup:
      https://drive.google.com/drive/folders/<FOLDER_ID>
   6. Run: python update_notebook_lm.py --folder-id <FOLDER_ID>
 
-Subsequent runs reuse the saved token and only upload changed PDFs.
+Subsequent runs reuse the saved token and only upload changed documents.
 """
 
 import argparse
 import hashlib
 import json
+import mimetypes
 import sys
 import tempfile
 from pathlib import Path
@@ -33,27 +34,12 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-DOC_LANDING_URL = "https://documentation.suse.com/multi-linux-manager/"
-HTML_SOURCES = [
-    {
-        "filename": "SUSE Multi-Linux Manager Server 5.2 Release Notes.html",
-        "url": (
-            "https://www.suse.com/releasenotes/x86_64/multi-linux-manager/"
-            "5.2/index.html"
-        ),
-    },
-    {
-        "filename": "SUSE Multi-Linux Manager Proxy 5.2 Release Notes.html",
-        "url": (
-            "https://www.suse.com/releasenotes/x86_64/multi-linux-manager-proxy/"
-            "5.2/index.html"
-        ),
-    },
-]
 GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
 CREDENTIALS_FILE = "credentials.json"
 TOKEN_FILE = "token.json"
 MANIFEST_FILE = "manifest.json"
+CONFIG_FILE = "sources.json"
+USER_AGENT = "notebook-lm-updater/1.0"
 
 
 def get_drive_service():
@@ -79,26 +65,96 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 
-def find_pdf_urls():
-    """Fetch the latest docs index and return its URL plus its PDF links."""
-    session = requests.Session()
-    session.headers["User-Agent"] = "notebook-lm-updater/1.0"
+def load_config(config_path):
+    return json.loads(Path(config_path).read_text())
 
-    resp = session.get(DOC_LANDING_URL)
+
+def guess_mime_type(filename):
+    mime_type, _ = mimetypes.guess_type(filename)
+    if not mime_type:
+        raise ValueError(f"Could not guess MIME type for {filename}")
+    return mime_type
+
+
+def normalize_extension(extension):
+    return extension if extension.startswith(".") else f".{extension}"
+
+
+def normalize_url(url):
+    parsed = urlparse(url)
+    if (parsed.scheme, parsed.port) not in (("http", 80), ("https", 443)):
+        return url
+    hostname = parsed.hostname or ""
+    if parsed.username or parsed.password:
+        userinfo = parsed.username or ""
+        if parsed.password:
+            userinfo = f"{userinfo}:{parsed.password}"
+        hostname = f"{userinfo}@{hostname}"
+    if parsed.port and parsed.port not in (80, 443):
+        hostname = f"{hostname}:{parsed.port}"
+    return parsed._replace(netloc=hostname).geturl()
+
+
+def resolve_url_prefix(base_url, prefix):
+    if not prefix:
+        return None
+    if urlparse(prefix).scheme:
+        return normalize_url(prefix)
+    return normalize_url(urljoin(base_url, prefix))
+
+
+def single_file_documents(source):
+    filename = source["filename"]
+    return [
+        {
+            "filename": filename,
+            "url": source["url"],
+            "mime_type": source.get("mime_type") or guess_mime_type(filename),
+            "source_name": source.get("name"),
+        }
+    ]
+
+
+def discovered_file_documents(source):
+    """Fetch a source index page and return linked files matching its filters."""
+    session = requests.Session()
+    session.headers["User-Agent"] = USER_AGENT
+
+    resp = session.get(source["base_url"])
     resp.raise_for_status()
-    doc_base_url = resp.url
-    doc_path_prefix = f"{urlparse(doc_base_url).path.rstrip('/')}/"
+    resolved_base_url = normalize_url(resp.url)
+    include_url_prefix = resolve_url_prefix(
+        resolved_base_url, source.get("include_url_prefix")
+    )
+    file_extension = normalize_extension(source["file_extension"])
+    mime_type = source.get("mime_type") or guess_mime_type(file_extension)
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    pdfs = {}
+    documents = {}
     for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.endswith(".pdf") and href.startswith(doc_path_prefix):
-            url = urljoin("https://documentation.suse.com", href)
-            filename = Path(urlparse(href).path).name
-            pdfs[filename] = url
+        url = normalize_url(urljoin(resolved_base_url, a["href"]))
+        if include_url_prefix and not url.startswith(include_url_prefix):
+            continue
+        if not urlparse(url).path.endswith(file_extension):
+            continue
+        filename = Path(urlparse(url).path).name
+        documents[filename] = {
+            "filename": filename,
+            "url": url,
+            "mime_type": mime_type,
+            "source_name": source.get("name"),
+        }
 
-    return doc_base_url, pdfs
+    return resolved_base_url, documents
+
+
+def source_documents(source):
+    source_type = source["type"]
+    if source_type == "single_file":
+        return source["url"], {doc["filename"]: doc for doc in single_file_documents(source)}
+    if source_type == "discovered_files":
+        return discovered_file_documents(source)
+    raise ValueError(f"Unsupported source type: {source_type}")
 
 
 def load_manifest():
@@ -164,11 +220,15 @@ def upload_to_drive(
     return file["id"]
 
 
-def sync_html_source(service, folder_id, manifest, tmpdir, source):
-    """Import a configured HTML page as a Google Doc when its content changes."""
-    filename = source["filename"]
-    url = source["url"]
+def sync_document(service, folder_id, manifest, tmpdir, document):
+    """Import a configured document as a Google Doc when its content changes."""
+    filename = document["filename"]
+    url = document["url"]
     entry = manifest.get(filename)
+
+    if not has_changed(url, entry):
+        print(f"  skipped  {filename} (unchanged)")
+        return False, True
 
     print(f"  downloading {filename} ...")
     dest = Path(tmpdir) / filename
@@ -183,11 +243,13 @@ def sync_html_source(service, folder_id, manifest, tmpdir, source):
         folder_id,
         filename,
         str(dest),
-        source_mime_type="text/html",
+        source_mime_type=document["mime_type"],
         drive_file_id=entry.get("drive_file_id") if entry else None,
     )
     manifest[filename] = {
         "url": url,
+        "mime_type": document["mime_type"],
+        "source_name": document.get("source_name"),
         "drive_file_id": drive_id,
         "etag": headers.get("ETag"),
         "size": headers.get("Content-Length"),
@@ -199,19 +261,30 @@ def sync_html_source(service, folder_id, manifest, tmpdir, source):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Sync the latest SUSE MLM documentation PDFs to Google Drive"
+        description="Sync configured source documents to Google Drive"
     )
     parser.add_argument(
         "--folder-id",
         required=True,
         help="Google Drive folder ID (from the folder's URL)",
     )
+    parser.add_argument(
+        "--config",
+        default=CONFIG_FILE,
+        help=f"JSON source configuration file (default: {CONFIG_FILE})",
+    )
     args = parser.parse_args()
 
-    print(f"Fetching latest PDF list from {DOC_LANDING_URL} ...")
-    doc_base_url, pdfs = find_pdf_urls()
-    print(f"Using documentation release at {doc_base_url}")
-    print(f"Found {len(pdfs)} PDFs and {len(HTML_SOURCES)} HTML pages\n")
+    config = load_config(args.config)
+    sources = config["sources"]
+    documents = {}
+    for source in sources:
+        print(f"Discovering {source['name']} ...")
+        source_url, source_docs = source_documents(source)
+        documents.update(source_docs)
+        print(f"  using {source_url}")
+        print(f"  found {len(source_docs)} document(s)")
+    print(f"\nFound {len(documents)} total document(s)\n")
 
     manifest = load_manifest()
     service = get_drive_service()
@@ -219,38 +292,12 @@ def main():
     updated = skipped = 0
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        for source in HTML_SOURCES:
-            html_updated, html_skipped = sync_html_source(
-                service, args.folder_id, manifest, tmpdir, source
+        for document in sorted(documents.values(), key=lambda item: item["filename"]):
+            doc_updated, doc_skipped = sync_document(
+                service, args.folder_id, manifest, tmpdir, document
             )
-            updated += html_updated
-            skipped += html_skipped
-
-        for filename, url in sorted(pdfs.items()):
-            entry = manifest.get(filename)
-            if not has_changed(url, entry):
-                print(f"  skipped  {filename} (unchanged)")
-                skipped += 1
-                continue
-
-            print(f"  downloading {filename} ...")
-            dest = Path(tmpdir) / filename
-            headers = download(url, str(dest))
-
-            drive_id = upload_to_drive(
-                service, args.folder_id, filename, str(dest),
-                source_mime_type="application/pdf",
-                drive_file_id=entry.get("drive_file_id") if entry else None,
-            )
-
-            manifest[filename] = {
-                "url": url,
-                "drive_file_id": drive_id,
-                "etag": headers.get("ETag"),
-                "size": headers.get("Content-Length"),
-            }
-            save_manifest(manifest)
-            updated += 1
+            updated += doc_updated
+            skipped += doc_skipped
 
     print(f"\nDone: {updated} uploaded/updated, {skipped} skipped (unchanged)")
 

@@ -1,8 +1,8 @@
 # NotebookLM Updater
 
-Sync the latest SUSE Multi-Linux Manager documentation PDFs and configured HTML pages to a Google Drive folder as native Google Docs for use with NotebookLM.
+Sync configured source documents to a Google Drive folder as native Google Docs for use with NotebookLM.
 
-The script discovers PDF manuals from the official documentation landing page and imports configured single-page HTML sources, including the Multi-Linux Manager and Multi-Linux Manager Proxy 5.2 release notes. It imports each source as a Google Doc and records source metadata in a local manifest. Later runs only replace documents whose source has changed.
+The script can import single files, such as HTML release notes, and discover linked files of a configured type, such as PDFs from a documentation landing page. It imports each source as a Google Doc and records source metadata in a local manifest. Later runs only replace documents whose source has changed.
 
 ## Setup
 
@@ -29,12 +29,45 @@ source .venv/bin/activate
 python notebooklm_updater.py --folder-id FOLDER_ID
 ```
 
+Use another source configuration with `--config`:
+
+```bash
+python notebooklm_updater.py --folder-id FOLDER_ID --config my-sources.json
+```
+
 The first run opens a browser so each user can authorize their own Google account, then saves the resulting OAuth token in `token.json`. Both that token and `credentials.json` are ignored by Git.
 
 ## Updates
 
 The script stores source URLs, ETags, file sizes, content hashes where needed, and managed Google Drive IDs in `manifest.json`. When an upstream PDF or configured HTML page changes, it imports a replacement Google Doc, then deletes the prior managed Drive file. To force a document to be imported again, remove its change-detection fields from its entry in `manifest.json`.
 
-## HTML Sources
+## Sources
 
-Configure single-page HTML documents in the `HTML_SOURCES` list near the top of `notebooklm_updater.py`. Each entry needs a `filename` (the Google Doc name) and a `url`. HTML is downloaded on each run and compared using a SHA-256 content hash, so unchanged pages are not re-imported.
+Configure sources in `sources.json`. A source can be a `single_file` or `discovered_files` entry.
+
+Single-file sources import exactly one URL:
+
+```json
+{
+   "name": "SUSE Multi-Linux Manager Server 5.2 Release Notes",
+   "type": "single_file",
+   "url": "https://www.suse.com/releasenotes/x86_64/multi-linux-manager/5.2/index.html",
+   "filename": "SUSE Multi-Linux Manager Server 5.2 Release Notes.html",
+   "mime_type": "text/html"
+}
+```
+
+Discovered-file sources fetch `base_url`, parse links from that page, make each link absolute, then import files whose resolved URL path ends with `file_extension`:
+
+```json
+{
+   "name": "SUSE Multi-Linux Manager 5.2 PDFs",
+   "type": "discovered_files",
+   "base_url": "https://documentation.suse.com/multi-linux-manager/",
+   "include_url_prefix": "https://documentation.suse.com/multi-linux-manager/5.2/",
+   "file_extension": ".pdf",
+   "mime_type": "application/pdf"
+}
+```
+
+`include_url_prefix` is optional. When set, it means only discovered files whose absolute URL starts with that prefix are imported. For example, with `file_extension` set to `.pdf`, all linked PDF files under that URL prefix are downloaded and converted, while matching PDF links outside the prefix are ignored. The prefix may be an absolute URL or a path resolved relative to the fetched `base_url`.

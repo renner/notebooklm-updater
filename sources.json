@@ -1,0 +1,26 @@
+{
+  "sources": [
+    {
+      "name": "SUSE Multi-Linux Manager Server 5.2 Release Notes",
+      "type": "single_file",
+      "url": "https://www.suse.com/releasenotes/x86_64/multi-linux-manager/5.2/index.html",
+      "filename": "SUSE Multi-Linux Manager Server 5.2 Release Notes.html",
+      "mime_type": "text/html"
+    },
+    {
+      "name": "SUSE Multi-Linux Manager Proxy 5.2 Release Notes",
+      "type": "single_file",
+      "url": "https://www.suse.com/releasenotes/x86_64/multi-linux-manager-proxy/5.2/index.html",
+      "filename": "SUSE Multi-Linux Manager Proxy 5.2 Release Notes.html",
+      "mime_type": "text/html"
+    },
+    {
+      "name": "SUSE Multi-Linux Manager 5.2 PDFs",
+      "type": "discovered_files",
+      "base_url": "https://documentation.suse.com/multi-linux-manager/",
+      "include_url_prefix": "https://documentation.suse.com/multi-linux-manager/5.2/",
+      "file_extension": ".pdf",
+      "mime_type": "application/pdf"
+    }
+  ]
+}
